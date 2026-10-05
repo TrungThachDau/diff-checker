@@ -1,7 +1,6 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import { computeDiff } from './utils/diffHelper.js'
-import { sfx } from './utils/sound.js'
 
 // State
 const oldText = ref('')
@@ -11,23 +10,23 @@ const ignoreCase = ref(false)
 const ignoreWhitespace = ref(false)
 const showAllEol = ref(false) // Xem EOL cả ở các dòng khớp
 const colorScheme = ref('all-red') // 'all-red' (tô đỏ chỗ khác) | 'classic' (đỏ cũ, xanh mới)
-const activeView = ref('diff') // 'diff' | 'edit'
-const soundEnabled = ref(true)
 
-// Panel Scroll Sync References
+// Independent edit state per column (default to edit if text is empty)
+const isEditingOld = ref(true)
+const isEditingNew = ref(true)
+
+// DOM references
+const oldTextareaRef = ref(null)
+const newTextareaRef = ref(null)
 const leftScrollRef = ref(null)
 const rightScrollRef = ref(null)
 let isSyncingScroll = false
 
-function toggleSound() {
-  soundEnabled.value = !soundEnabled.value
-  sfx.enabled = soundEnabled.value
-  if (soundEnabled.value) {
-    sfx.playPop()
-  }
-}
+// Copy feedback state
+const copiedOld = ref(false)
+const copiedNew = ref(false)
 
-// Compute Diff (mặc định luôn luôn so sánh nghiêm ngặt cả CRLF và LF)
+// Compute Diff (mặc định luôn so sánh nghiêm ngặt cả CRLF và LF)
 const diffResult = computed(() => {
   return computeDiff(oldText.value, newText.value, {
     mode: diffMode.value,
@@ -47,7 +46,7 @@ function parseChunkParts(val, isDiff) {
   let match
   while ((match = regex.exec(val)) !== null) {
     if (match.index > lastIdx) {
-      parts.push({ type: 'text', text: val.slice(lastIdx, match.index) })
+      parts.push({ type: 'text', text: val.slice(lastIdx, match.index), raw: '' })
     }
     const raw = match[0]
     const eolType = raw === '\r\n' ? 'CRLF' : raw === '\n' ? 'LF' : 'CR'
@@ -60,50 +59,131 @@ function parseChunkParts(val, isDiff) {
     lastIdx = regex.lastIndex
   }
   if (lastIdx < val.length) {
-    parts.push({ type: 'text', text: val.slice(lastIdx) })
+    parts.push({ type: 'text', text: val.slice(lastIdx), raw: '' })
   }
   return parts
 }
 
+// onBlur (focus out): tự động so sánh khi rời khỏi ô soạn thảo
+function onTextareaBlur(side) {
+  setTimeout(() => {
+    if (side === 'old' && oldText.value) {
+      isEditingOld.value = false
+    } else if (side === 'new' && newText.value) {
+      isEditingNew.value = false
+    }
+  }, 100)
+}
+
+// Start editing on click
+function startEditing(side) {
+  if (side === 'old') {
+    isEditingOld.value = true
+    nextTick(() => {
+      oldTextareaRef.value?.focus()
+    })
+  } else {
+    isEditingNew.value = true
+    nextTick(() => {
+      newTextareaRef.value?.focus()
+    })
+  }
+}
+
+function onDiffClick(side) {
+  // Không chuyển chế độ nếu người dùng đang bôi đen (select) văn bản để sao chép
+  const selection = window.getSelection()
+  if (selection && selection.toString().length > 0) {
+    return
+  }
+  startEditing(side)
+}
+
+function toggleEdit(side) {
+  if (side === 'old') {
+    isEditingOld.value = !isEditingOld.value
+    if (isEditingOld.value) {
+      nextTick(() => oldTextareaRef.value?.focus())
+    }
+  } else {
+    isEditingNew.value = !isEditingNew.value
+    if (isEditingNew.value) {
+      nextTick(() => newTextareaRef.value?.focus())
+    }
+  }
+}
+
+// Toolbar controls: chuyển ngay sang chế độ xem diff khi đổi thiết lập
+function setDiffMode(mode) {
+  diffMode.value = mode
+  if (oldText.value) isEditingOld.value = false
+  if (newText.value) isEditingNew.value = false
+}
+
+function setColorScheme(scheme) {
+  colorScheme.value = scheme
+  if (oldText.value) isEditingOld.value = false
+  if (newText.value) isEditingNew.value = false
+}
+
+function toggleShowAllEol() {
+  showAllEol.value = !showAllEol.value
+  if (oldText.value) isEditingOld.value = false
+  if (newText.value) isEditingNew.value = false
+}
+
 // Swap texts
 function swapTexts() {
-  sfx.playSwoosh()
   const temp = oldText.value
   oldText.value = newText.value
   newText.value = temp
+  if (oldText.value) isEditingOld.value = false
+  if (newText.value) isEditingNew.value = false
 }
 
 // Clear all
 function clearTexts() {
-  sfx.playAlert()
   oldText.value = ''
   newText.value = ''
+  isEditingOld.value = true
+  isEditingNew.value = true
 }
 
 // Convert EOL helper
 function convertEol(target, toType) {
-  sfx.playPop()
   if (target === 'old') {
     if (toType === 'LF') {
       oldText.value = oldText.value.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
     } else if (toType === 'CRLF') {
       oldText.value = oldText.value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n')
     }
+    isEditingOld.value = false
   } else {
     if (toType === 'LF') {
       newText.value = newText.value.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
     } else if (toType === 'CRLF') {
       newText.value = newText.value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n')
     }
+    isEditingNew.value = false
   }
 }
 
-// Copy to clipboard
+// Copy to clipboard with inline feedback
 async function copyText(text, side) {
-  sfx.playPop()
+  if (!text) return
   try {
     await navigator.clipboard.writeText(text)
-    alert(`Đã sao chép nội dung văn bản ${side}!`)
+    if (side === 'old') {
+      copiedOld.value = true
+      setTimeout(() => {
+        copiedOld.value = false
+      }, 1500)
+    } else {
+      copiedNew.value = true
+      setTimeout(() => {
+        copiedNew.value = false
+      }, 1500)
+    }
   } catch {
     // fallback
   }
@@ -113,20 +193,21 @@ async function copyText(text, side) {
 function handleFileUpload(event, target) {
   const file = event.target.files?.[0]
   if (!file) return
-  sfx.playPop()
   const reader = new FileReader()
   reader.onload = (e) => {
     if (target === 'old') {
       oldText.value = e.target.result
+      isEditingOld.value = false
     } else {
       newText.value = e.target.result
+      isEditingNew.value = false
     }
   }
   reader.readAsText(file)
   event.target.value = ''
 }
 
-// Synchronized scrolling
+// Synchronized scrolling for diff views
 function handleScroll(source) {
   if (isSyncingScroll) return
   isSyncingScroll = true
@@ -143,29 +224,20 @@ function handleScroll(source) {
     isSyncingScroll = false
   })
 }
-
-// Trigger comparison sound
-function triggerCheck() {
-  if (stats.value.isExactMatch && (oldText.value || newText.value)) {
-    sfx.playSuccess()
-  } else {
-    sfx.playPop()
-  }
-}
 </script>
 
 <template>
-  <div class="duo-app">
+  <div class="diff-app">
     <!-- TOP NAVIGATION BAR -->
-    <header class="duo-header">
+    <header class="app-header">
       <div class="header-container">
         <!-- Brand Logo -->
         <div class="brand-logo">
           <div class="brand-icon">
-            <svg viewBox="0 0 36 36" width="34" height="34" fill="none">
-              <rect width="36" height="36" rx="10" fill="#58cc02" />
-              <rect x="6" y="8" width="10" height="20" rx="3" fill="#ffffff" />
-              <rect x="20" y="8" width="10" height="20" rx="3" fill="#ffffff" />
+            <svg viewBox="0 0 36 36" width="32" height="32" fill="none">
+              <rect width="36" height="36" rx="8" fill="#58cc02" />
+              <rect x="6" y="8" width="10" height="20" rx="2" fill="#ffffff" />
+              <rect x="20" y="8" width="10" height="20" rx="2" fill="#ffffff" />
               <!-- Red diff mark on left -->
               <rect x="8" y="14" width="6" height="3" rx="1.5" fill="#ff4b4b" />
               <!-- Red diff mark on right -->
@@ -178,16 +250,15 @@ function triggerCheck() {
             </svg>
           </div>
           <span class="brand-name">Diff<span class="brand-diff">Checker</span></span>
-          <span class="brand-badge">PRO</span>
         </div>
 
-        <!-- Status & Tools -->
+        <!-- Status Metrics -->
         <div class="status-bar">
           <!-- EOL Mismatch Warning Pill -->
           <div
             v-if="stats.isEolMismatch"
             class="status-pill eol-warning-pill"
-            :title="`Bên trái dùng ${stats.oldEol}, bên phải dùng ${stats.newEol}. Khác biệt xuống dòng được tô đỏ trực tiếp.`"
+            :title="`Bên trái dùng ${stats.oldEol}, bên phải dùng ${stats.newEol}. Khác biệt xuống dòng được đánh dấu rõ ràng.`"
           >
             <span class="status-dot red-dot"></span>
             <span class="status-label">LỆCH EOL:</span>
@@ -198,7 +269,7 @@ function triggerCheck() {
           <div
             v-if="stats.diffCount > 0"
             class="status-pill diff-status-pill"
-            title="Số điểm khác biệt tìm thấy (bao gồm cả khác biệt ký tự và xuống dòng)"
+            title="Số điểm khác biệt tìm thấy"
           >
             <span class="status-dot red-dot"></span>
             <span class="status-label">KHÁC BIỆT:</span>
@@ -209,22 +280,12 @@ function triggerCheck() {
           <div
             v-if="oldText || newText"
             class="status-pill match-status-pill"
-            title="Tỷ lệ trùng khớp giữa 2 văn bản (chỉ đạt 100% khi khớp cả nội dung lẫn CRLF/LF)"
+            title="Tỷ lệ trùng khớp giữa 2 văn bản"
           >
             <span class="status-dot green-dot"></span>
             <span class="status-label">TRÙNG KHỚP:</span>
             <span class="status-num text-green">{{ stats.similarityPercent }}%</span>
           </div>
-
-          <!-- Sound Toggle Button -->
-          <button
-            class="sound-btn"
-            :class="{ active: soundEnabled }"
-            @click="toggleSound"
-            :title="soundEnabled ? 'Tắt hiệu ứng âm thanh' : 'Bật hiệu ứng âm thanh'"
-          >
-            <span>{{ soundEnabled ? '🔊' : '🔇' }}</span>
-          </button>
         </div>
       </div>
     </header>
@@ -233,37 +294,14 @@ function triggerCheck() {
       <!-- CONTROL TOOLBAR -->
       <section class="toolbar-section">
         <div class="toolbar-card duo-card">
-          <!-- Left: View Mode Tabs -->
-          <div class="tool-group">
-            <span class="group-title">CHẾ ĐỘ XEM:</span>
-            <div class="segmented-control">
-              <button
-                class="segment-btn"
-                :class="{ active: activeView === 'diff' }"
-                @click="activeView = 'diff'; sfx.playPop()"
-              >
-                <span class="btn-icon">🔍</span>
-                <span>So sánh tô đỏ</span>
-              </button>
-              <button
-                class="segment-btn"
-                :class="{ active: activeView === 'edit' }"
-                @click="activeView = 'edit'; sfx.playPop()"
-              >
-                <span class="btn-icon">✏️</span>
-                <span>Chỉnh sửa văn bản</span>
-              </button>
-            </div>
-          </div>
-
-          <!-- Middle: Diff Granularity -->
+          <!-- Diff Granularity -->
           <div class="tool-group">
             <span class="group-title">MỨC SO SÁNH:</span>
             <div class="segmented-control">
               <button
                 class="segment-btn"
                 :class="{ active: diffMode === 'words' }"
-                @click="diffMode = 'words'; sfx.playPop()"
+                @click="setDiffMode('words')"
                 title="So sánh chi tiết từng từ & khoảng trắng/xuống dòng"
               >
                 Từng từ
@@ -271,7 +309,7 @@ function triggerCheck() {
               <button
                 class="segment-btn"
                 :class="{ active: diffMode === 'chars' }"
-                @click="diffMode = 'chars'; sfx.playPop()"
+                @click="setDiffMode('chars')"
                 title="So sánh chi tiết từng ký tự & từng byte EOL"
               >
                 Từng ký tự
@@ -279,7 +317,7 @@ function triggerCheck() {
               <button
                 class="segment-btn"
                 :class="{ active: diffMode === 'lines' }"
-                @click="diffMode = 'lines'; sfx.playPop()"
+                @click="setDiffMode('lines')"
                 title="So sánh từng dòng"
               >
                 Từng dòng
@@ -294,35 +332,35 @@ function triggerCheck() {
               <button
                 class="segment-btn red-mode"
                 :class="{ active: colorScheme === 'all-red' }"
-                @click="colorScheme = 'all-red'; sfx.playPop()"
-                title="Tô đỏ tất cả điểm khác biệt ở cả 2 bên theo yêu cầu"
+                @click="setColorScheme('all-red')"
+                title="Tô đỏ tất cả điểm khác biệt ở cả 2 bên"
               >
                 🔴 Tô đỏ chỗ khác
               </button>
               <button
                 class="segment-btn"
                 :class="{ active: colorScheme === 'classic' }"
-                @click="colorScheme = 'classic'; sfx.playPop()"
-                title="Đỏ (text cũ đã bỏ) & Xanh (text mới thêm)"
+                @click="setColorScheme('classic')"
+                title="Đỏ (text cũ bỏ) & Xanh (text mới thêm)"
               >
                 🔴 Cũ / 🟢 Mới
               </button>
             </div>
           </div>
 
-          <!-- Optional: Show All EOL tags toggle -->
+          <!-- Show All EOL tags toggle -->
           <div class="tool-group">
             <button
               class="segment-btn"
               :class="{ active: showAllEol }"
-              @click="showAllEol = !showAllEol; sfx.playPop()"
+              @click="toggleShowAllEol"
               title="Hiện thêm ký hiệu CRLF/LF ở cả các dòng khớp"
             >
               <span>{{ showAllEol ? '👁️ Ẩn EOL dòng khớp' : '👁️ Hiện EOL cả bài' }}</span>
             </button>
           </div>
 
-          <!-- Right: Action Buttons -->
+          <!-- Action Buttons -->
           <div class="tool-actions">
             <button
               class="duo-btn duo-btn-outline duo-btn-sm"
@@ -342,7 +380,7 @@ function triggerCheck() {
         </div>
       </section>
 
-      <!-- MAIN SPLIT VIEW (2 COLUMNS: BÊN TRÁI TEXT CŨ, BÊN PHẢI TEXT MỚI) -->
+      <!-- MAIN SPLIT VIEW (2 COLUMNS) -->
       <section class="diff-split-container">
         <!-- LEFT COLUMN: TEXT CŨ (ORIGINAL) -->
         <div class="diff-column left-column duo-card">
@@ -367,6 +405,15 @@ function triggerCheck() {
             </div>
 
             <div class="column-tools">
+              <!-- Mode indicator / Toggle button -->
+              <button
+                class="icon-action-btn btn-mode-toggle"
+                @click="toggleEdit('old')"
+                :title="isEditingOld ? 'Xem kết quả so sánh' : 'Bấm để chỉnh sửa văn bản'"
+              >
+                {{ isEditingOld ? '🔍 Xem so sánh' : '✏️ Chỉnh sửa' }}
+              </button>
+
               <!-- EOL Convert buttons -->
               <div v-if="stats.oldEol !== 'None'" class="eol-convert-group">
                 <button
@@ -387,7 +434,7 @@ function triggerCheck() {
                 </button>
               </div>
 
-              <label class="icon-action-btn" title="Tải file .txt, .md, .js...">
+              <label class="icon-action-btn" title="Tải file văn bản (.txt, .md, .js...)">
                 📁 Tải file
                 <input
                   type="file"
@@ -398,42 +445,52 @@ function triggerCheck() {
               </label>
               <button
                 class="icon-action-btn"
-                @click="copyText(oldText, 'cũ')"
+                :class="{ 'btn-success': copiedOld }"
+                @click="copyText(oldText, 'old')"
                 title="Sao chép văn bản cũ"
               >
-                📋 Sao chép
+                {{ copiedOld ? '✓ Đã chép' : '📋 Sao chép' }}
               </button>
             </div>
           </div>
 
           <!-- Body -->
           <div class="column-body">
-            <!-- Edit Mode: Textarea (JetBrains Mono) -->
+            <!-- Edit Mode: Textarea -->
             <textarea
-              v-show="activeView === 'edit'"
+              v-show="isEditingOld"
+              ref="oldTextareaRef"
               v-model="oldText"
-              class="duo-textarea old-textarea"
+              class="duo-textarea"
               placeholder="Nhập hoặc dán văn bản cũ vào đây..."
               spellcheck="false"
+              @blur="onTextareaBlur('old')"
             ></textarea>
 
-            <!-- Diff View: Red Highlighted Stream (JetBrains Mono) -->
+            <!-- Diff View: Highlighted Stream -->
             <div
-              v-show="activeView === 'diff'"
+              v-show="!isEditingOld"
               ref="leftScrollRef"
               class="diff-stream-view"
+              @click="onDiffClick('old')"
               @scroll="handleScroll('left')"
+              :title="oldText ? 'Bấm vào để chỉnh sửa lại' : ''"
             >
-              <div v-if="!oldText" class="empty-diff-placeholder">
+              <div
+                v-if="!oldText"
+                class="empty-diff-placeholder"
+                @click="startEditing('old')"
+                title="Bấm để nhập văn bản"
+              >
                 <span class="placeholder-icon">📝</span>
                 <p class="placeholder-main">Chưa có văn bản cũ</p>
                 <p class="placeholder-sub">
-                  Dán text vào đây hoặc chuyển sang tab <b>"Chỉnh sửa văn bản"</b> để nhập.
+                  Bấm vào đây để nhập hoặc dán văn bản.
                 </p>
               </div>
               <div v-else class="diff-text-flow">
                 <template v-for="chunk in diffResult.leftChunks" :key="chunk.id">
-                  <!-- Highlighted Removed/Different Chunk (TÔ ĐỎ Ở CHỖ KHÁC, KỂ CẢ CRLF/LF) -->
+                  <!-- Highlighted Removed/Different Chunk -->
                   <span
                     v-if="chunk.isDiff"
                     class="diff-chunk diff-removed"
@@ -442,15 +499,16 @@ function triggerCheck() {
                     <span class="diff-sign">-</span>
                     <template v-for="(part, pIdx) in parseChunkParts(chunk.value, true)" :key="pIdx">
                       <span v-if="part.type === 'text'" class="diff-val">{{ part.text }}</span>
-                      <span
-                        v-else
-                        class="eol-badge-diff"
-                        :class="part.eolType.toLowerCase()"
-                        :title="`Khác biệt EOL: '${part.eolType}'`"
-                      >
-                        <span class="eol-icon">↵</span>{{ part.eolType }}
-                      </span>
-                      <span v-if="part.raw.includes('\n')">{{ '\n' }}</span>
+                      <template v-else>
+                        <span
+                          class="eol-badge-diff"
+                          :class="part.eolType.toLowerCase()"
+                          :title="`Khác biệt EOL: '${part.eolType}'`"
+                        >
+                          <span class="eol-icon">↵</span>{{ part.eolType }}
+                        </span>
+                        <span v-if="part.raw && part.raw.includes('\n')">{{ '\n' }}</span>
+                      </template>
                     </template>
                   </span>
 
@@ -466,21 +524,13 @@ function triggerCheck() {
                         >
                           <span class="eol-icon">↵</span>{{ part.eolType }}
                         </span>
-                        <span v-if="part.raw.includes('\n')">{{ '\n' }}</span>
+                        <span v-if="part.raw && part.raw.includes('\n')">{{ '\n' }}</span>
                       </template>
                     </template>
                   </span>
                 </template>
               </div>
             </div>
-          </div>
-
-          <!-- Column Footer -->
-          <div class="column-footer">
-            <span class="column-footer-text">
-              <span class="diff-indicator-badge red"></span>
-              Tô đỏ chữ hoặc ký tự xuống dòng (CRLF/LF) bị xóa hoặc sửa đổi
-            </span>
           </div>
         </div>
 
@@ -507,6 +557,15 @@ function triggerCheck() {
             </div>
 
             <div class="column-tools">
+              <!-- Mode indicator / Toggle button -->
+              <button
+                class="icon-action-btn btn-mode-toggle"
+                @click="toggleEdit('new')"
+                :title="isEditingNew ? 'Xem kết quả so sánh' : 'Bấm để chỉnh sửa văn bản'"
+              >
+                {{ isEditingNew ? '🔍 Xem so sánh' : '✏️ Chỉnh sửa' }}
+              </button>
+
               <!-- EOL Convert buttons -->
               <div v-if="stats.newEol !== 'None'" class="eol-convert-group">
                 <button
@@ -527,7 +586,7 @@ function triggerCheck() {
                 </button>
               </div>
 
-              <label class="icon-action-btn" title="Tải file .txt, .md, .js...">
+              <label class="icon-action-btn" title="Tải file văn bản (.txt, .md, .js...)">
                 📁 Tải file
                 <input
                   type="file"
@@ -538,42 +597,52 @@ function triggerCheck() {
               </label>
               <button
                 class="icon-action-btn"
-                @click="copyText(newText, 'mới')"
+                :class="{ 'btn-success': copiedNew }"
+                @click="copyText(newText, 'new')"
                 title="Sao chép văn bản mới"
               >
-                📋 Sao chép
+                {{ copiedNew ? '✓ Đã chép' : '📋 Sao chép' }}
               </button>
             </div>
           </div>
 
           <!-- Body -->
           <div class="column-body">
-            <!-- Edit Mode: Textarea (JetBrains Mono) -->
+            <!-- Edit Mode: Textarea -->
             <textarea
-              v-show="activeView === 'edit'"
+              v-show="isEditingNew"
+              ref="newTextareaRef"
               v-model="newText"
-              class="duo-textarea new-textarea"
+              class="duo-textarea"
               placeholder="Nhập hoặc dán văn bản mới vào đây..."
               spellcheck="false"
+              @blur="onTextareaBlur('new')"
             ></textarea>
 
-            <!-- Diff View: Red Highlighted Stream (JetBrains Mono) -->
+            <!-- Diff View: Highlighted Stream -->
             <div
-              v-show="activeView === 'diff'"
+              v-show="!isEditingNew"
               ref="rightScrollRef"
               class="diff-stream-view"
+              @click="onDiffClick('new')"
               @scroll="handleScroll('right')"
+              :title="newText ? 'Bấm vào để chỉnh sửa lại' : ''"
             >
-              <div v-if="!newText" class="empty-diff-placeholder">
+              <div
+                v-if="!newText"
+                class="empty-diff-placeholder"
+                @click="startEditing('new')"
+                title="Bấm để nhập văn bản"
+              >
                 <span class="placeholder-icon">📄</span>
                 <p class="placeholder-main">Chưa có văn bản mới</p>
                 <p class="placeholder-sub">
-                  Dán text vào đây hoặc chuyển sang tab <b>"Chỉnh sửa văn bản"</b> để nhập.
+                  Bấm vào đây để nhập hoặc dán văn bản.
                 </p>
               </div>
               <div v-else class="diff-text-flow">
                 <template v-for="chunk in diffResult.rightChunks" :key="chunk.id">
-                  <!-- Highlighted Added/Different Chunk (TÔ ĐỎ THEO YÊU CẦU HOẶC XANH NẾU CLASSIC) -->
+                  <!-- Highlighted Added/Different Chunk -->
                   <span
                     v-if="chunk.isDiff"
                     :class="[
@@ -585,15 +654,16 @@ function triggerCheck() {
                     <span class="diff-sign">+</span>
                     <template v-for="(part, pIdx) in parseChunkParts(chunk.value, true)" :key="pIdx">
                       <span v-if="part.type === 'text'" class="diff-val">{{ part.text }}</span>
-                      <span
-                        v-else
-                        class="eol-badge-diff"
-                        :class="part.eolType.toLowerCase()"
-                        :title="`Khác biệt EOL: '${part.eolType}'`"
-                      >
-                        <span class="eol-icon">↵</span>{{ part.eolType }}
-                      </span>
-                      <span v-if="part.raw.includes('\n')">{{ '\n' }}</span>
+                      <template v-else>
+                        <span
+                          class="eol-badge-diff"
+                          :class="part.eolType.toLowerCase()"
+                          :title="`Khác biệt EOL: '${part.eolType}'`"
+                        >
+                          <span class="eol-icon">↵</span>{{ part.eolType }}
+                        </span>
+                        <span v-if="part.raw && part.raw.includes('\n')">{{ '\n' }}</span>
+                      </template>
                     </template>
                   </span>
 
@@ -609,7 +679,7 @@ function triggerCheck() {
                         >
                           <span class="eol-icon">↵</span>{{ part.eolType }}
                         </span>
-                        <span v-if="part.raw.includes('\n')">{{ '\n' }}</span>
+                        <span v-if="part.raw && part.raw.includes('\n')">{{ '\n' }}</span>
                       </template>
                     </template>
                   </span>
@@ -617,87 +687,22 @@ function triggerCheck() {
               </div>
             </div>
           </div>
-
-          <!-- Column Footer -->
-          <div class="column-footer">
-            <span class="column-footer-text">
-              <span
-                class="diff-indicator-badge"
-                :class="colorScheme === 'all-red' ? 'red' : 'green'"
-              ></span>
-              {{
-                colorScheme === 'all-red'
-                  ? 'Tô đỏ chữ hoặc ký tự xuống dòng (CRLF/LF) mới được thêm hoặc thay thế'
-                  : 'Tô xanh chữ hoặc ký tự xuống dòng (CRLF/LF) mới được thêm hoặc thay thế'
-              }}
-            </span>
-          </div>
         </div>
       </section>
     </main>
-
-    <!-- DUOLINGO STYLED BOTTOM ACTION BAR -->
-    <footer class="duo-bottom-bar">
-      <div class="bottom-container">
-        <!-- Left: Similarity meter & Duolingo Progress bar -->
-        <div class="metric-block">
-          <div class="metric-header">
-            <span class="metric-title">TỶ LỆ TƯƠNG ĐỒNG:</span>
-            <span class="metric-val" :class="{ 'val-perfect': stats.similarityPercent === 100 }">
-              {{ stats.similarityPercent }}%
-            </span>
-          </div>
-          <div class="duo-progress-track">
-            <div
-              class="duo-progress-fill"
-              :style="{ width: `${stats.similarityPercent}%` }"
-              :class="{
-                'progress-gold': stats.similarityPercent === 100,
-                'progress-normal': stats.similarityPercent < 100
-              }"
-            >
-              <div class="progress-shine"></div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Center: Highlights count summary -->
-        <div class="summary-pills">
-          <div class="diff-summary-card red">
-            <span class="summary-label">ĐIỂM KHÁC BIỆT</span>
-            <span class="summary-num">{{ stats.diffCount }}</span>
-          </div>
-          <div class="diff-summary-card green">
-            <span class="summary-label">ĐÃ KHỚP</span>
-            <span class="summary-num">{{ stats.similarityPercent }}%</span>
-          </div>
-        </div>
-
-        <!-- Right: Check / Action Button -->
-        <div class="main-action">
-          <button
-            class="duo-btn duo-btn-green check-btn"
-            @click="triggerCheck"
-          >
-            <span>✨ SO SÁNH / KIỂM TRA</span>
-          </button>
-        </div>
-      </div>
-    </footer>
   </div>
 </template>
 
 <style scoped>
-.duo-app {
+.diff-app {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
   background-color: #f7f7f7;
-  padding-bottom: 96px; /* space for fixed bottom bar */
 }
 
 /* HEADER */
-.duo-header {
+.app-header {
   background-color: #ffffff;
   border-bottom: 2px solid var(--duo-gray-border);
   position: sticky;
@@ -707,7 +712,7 @@ function triggerCheck() {
 }
 
 .header-container {
-  max-width: 1320px;
+  max-width: 1400px;
   margin: 0 auto;
   padding: 12px 24px;
   display: flex;
@@ -729,7 +734,7 @@ function triggerCheck() {
 }
 
 .brand-name {
-  font-size: 24px;
+  font-size: 22px;
   font-weight: 900;
   letter-spacing: -0.5px;
   color: var(--duo-green);
@@ -737,17 +742,6 @@ function triggerCheck() {
 
 .brand-diff {
   color: var(--duo-blue);
-}
-
-.brand-badge {
-  background-color: var(--duo-yellow);
-  color: #795548;
-  font-size: 11px;
-  font-weight: 900;
-  padding: 3px 8px;
-  border-radius: 8px;
-  border-bottom: 2px solid var(--duo-yellow-dark);
-  letter-spacing: 0.5px;
 }
 
 .status-bar {
@@ -760,11 +754,11 @@ function triggerCheck() {
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 6px 14px;
-  border-radius: 14px;
+  padding: 5px 12px;
+  border-radius: 12px;
   font-weight: 800;
   font-size: 13px;
-  border: 2px solid var(--duo-gray-border);
+  border: 1.5px solid var(--duo-gray-border);
   background-color: #ffffff;
 }
 
@@ -802,7 +796,7 @@ function triggerCheck() {
 }
 
 .status-num {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 900;
 }
 .text-red {
@@ -812,60 +806,46 @@ function triggerCheck() {
   color: var(--duo-green-dark);
 }
 
-.sound-btn {
-  background: #ffffff;
-  border: 2px solid var(--duo-gray-border);
-  border-bottom: 3px solid var(--duo-gray-border);
-  border-radius: 14px;
-  padding: 7px 12px;
-  font-size: 16px;
-  cursor: pointer;
-  transition: all 0.1s ease;
-}
-.sound-btn:active {
-  transform: translateY(2px);
-  border-bottom-width: 1px;
-}
-
 /* MAIN CONTENT */
 .main-content {
-  max-width: 1320px;
+  max-width: 1400px;
   width: 100%;
   margin: 0 auto;
-  padding: 24px 20px;
+  padding: 18px 20px 24px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 16px;
+  flex: 1;
 }
 
 /* TOOLBAR */
 .toolbar-card {
-  padding: 14px 20px;
+  padding: 12px 18px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 16px;
+  gap: 14px;
   background-color: #ffffff;
 }
 
 .tool-group {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .group-title {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 900;
   color: var(--duo-text-muted);
-  letter-spacing: 0.6px;
+  letter-spacing: 0.5px;
 }
 
 .segmented-control {
   display: inline-flex;
   background-color: #f0f0f0;
-  border-radius: 14px;
+  border-radius: 12px;
   padding: 3px;
   border: 1px solid var(--duo-gray-border);
 }
@@ -873,8 +853,8 @@ function triggerCheck() {
 .segment-btn {
   border: none;
   background: transparent;
-  padding: 7px 15px;
-  border-radius: 11px;
+  padding: 6px 13px;
+  border-radius: 9px;
   font-family: var(--duo-font);
   font-size: 13px;
   font-weight: 800;
@@ -882,14 +862,14 @@ function triggerCheck() {
   cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   transition: all 0.15s ease;
 }
 
 .segment-btn.active {
   background-color: #ffffff;
   color: var(--duo-text-dark);
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
 .segment-btn.red-mode.active {
@@ -899,14 +879,15 @@ function triggerCheck() {
 .tool-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 /* SPLIT 2-COLUMN COMPARISON */
 .diff-split-container {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 20px;
+  gap: 16px;
+  flex: 1;
 }
 
 .diff-column {
@@ -914,11 +895,12 @@ function triggerCheck() {
   flex-direction: column;
   background-color: #ffffff;
   overflow: hidden;
-  height: 600px;
+  height: calc(100vh - 200px);
+  min-height: 520px;
 }
 
 .column-header {
-  padding: 14px 18px;
+  padding: 12px 16px;
   border-bottom: 2px solid var(--duo-gray-border);
   display: flex;
   align-items: center;
@@ -935,12 +917,12 @@ function triggerCheck() {
 .badge-tag {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  font-size: 13px;
+  gap: 6px;
+  font-size: 12px;
   font-weight: 900;
-  letter-spacing: 0.5px;
-  padding: 4px 12px;
-  border-radius: 12px;
+  letter-spacing: 0.4px;
+  padding: 3px 10px;
+  border-radius: 10px;
 }
 
 .tag-old {
@@ -956,8 +938,8 @@ function triggerCheck() {
 }
 
 .tag-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background-color: currentColor;
 }
@@ -967,8 +949,8 @@ function triggerCheck() {
   font-size: 10px;
   font-family: var(--duo-font-mono);
   font-weight: 800;
-  padding: 2px 6px;
-  border-radius: 6px;
+  padding: 1px 5px;
+  border-radius: 5px;
   letter-spacing: 0.5px;
 }
 .eol-indicator.crlf {
@@ -988,7 +970,7 @@ function triggerCheck() {
 }
 
 .sub-info {
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 700;
   color: var(--duo-text-muted);
 }
@@ -996,7 +978,7 @@ function triggerCheck() {
 .column-tools {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .eol-convert-group {
@@ -1006,16 +988,16 @@ function triggerCheck() {
 }
 
 .btn-mini {
-  padding: 4px 8px !important;
+  padding: 3px 7px !important;
   font-size: 11px !important;
 }
 
 .icon-action-btn {
   background-color: #ffffff;
   border: 1.5px solid var(--duo-gray-border);
-  border-bottom: 2.5px solid var(--duo-gray-border);
-  border-radius: 10px;
-  padding: 5px 11px;
+  border-bottom: 2px solid var(--duo-gray-border);
+  border-radius: 9px;
+  padding: 4px 10px;
   font-size: 12px;
   font-weight: 800;
   color: var(--duo-text);
@@ -1031,8 +1013,21 @@ function triggerCheck() {
   border-color: var(--duo-gray-border-dark);
 }
 .icon-action-btn:active {
-  transform: translateY(1.5px);
-  border-bottom-width: 1px;
+  transform: translateY(1px);
+}
+.icon-action-btn.btn-success {
+  background-color: var(--duo-green-light);
+  color: var(--duo-green-dark);
+  border-color: var(--duo-green);
+}
+
+.btn-mode-toggle {
+  color: var(--duo-blue-dark);
+  border-color: #a8e4ff;
+  background-color: #f0faff;
+}
+.btn-mode-toggle:hover {
+  background-color: #e0f4ff;
 }
 
 .hidden-file-input {
@@ -1047,18 +1042,16 @@ function triggerCheck() {
   background-color: #ffffff;
 }
 
-/* TEXTAREA WITH JETBRAINS MONO */
+/* TEXTAREA WITH MONOSPACE */
 .duo-textarea {
   width: 100%;
   height: 100%;
-  padding: 20px;
+  padding: 18px;
   border: none;
   outline: none;
   resize: none;
   font-family: var(--duo-font-mono);
-  font-size: 14.5px;
-  font-feature-settings: 'calt' 1, 'liga' 1;
-  letter-spacing: -0.1px;
+  font-size: 14px;
   tab-size: 2;
   line-height: 1.7;
   color: var(--duo-text);
@@ -1068,22 +1061,21 @@ function triggerCheck() {
   background-color: #fdfeff;
 }
 
-/* DIFF STREAM VIEW WITH JETBRAINS MONO */
+/* DIFF STREAM VIEW */
 .diff-stream-view {
   width: 100%;
   height: 100%;
-  padding: 20px;
+  padding: 18px;
   overflow-y: auto;
   overflow-x: auto;
   font-family: var(--duo-font-mono);
-  font-size: 14.5px;
-  font-feature-settings: 'calt' 1, 'liga' 1;
-  letter-spacing: -0.1px;
+  font-size: 14px;
   tab-size: 2;
   line-height: 1.8;
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;
+  cursor: pointer;
 }
 
 .empty-diff-placeholder {
@@ -1096,15 +1088,21 @@ function triggerCheck() {
   text-align: center;
   padding: 30px;
   font-family: var(--duo-font);
+  cursor: pointer;
+  border-radius: 12px;
+  transition: background-color 0.15s ease;
+}
+.empty-diff-placeholder:hover {
+  background-color: #fafafa;
 }
 
 .placeholder-icon {
-  font-size: 42px;
-  margin-bottom: 10px;
+  font-size: 38px;
+  margin-bottom: 8px;
 }
 
 .placeholder-main {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 800;
   color: var(--duo-text);
   margin-bottom: 4px;
@@ -1125,8 +1123,8 @@ function triggerCheck() {
 /* DIFF CHUNKS & HIGHLIGHTING */
 .diff-chunk {
   display: inline;
-  border-radius: 4px;
-  transition: all 0.15s ease;
+  border-radius: 3px;
+  transition: background-color 0.15s ease;
   font-family: var(--duo-font-mono);
 }
 
@@ -1134,16 +1132,15 @@ function triggerCheck() {
   color: #2b2b2b;
 }
 
-/* TÔ ĐỎ CHỖ KHÁC BIỆT (KỂ CẢ KÝ TỰ XUỐNG DÒNG) */
+/* TÔ ĐỎ CHỖ KHÁC BIỆT */
 .diff-removed {
   background-color: #ffd9da !important;
   color: #c91818 !important;
   border-bottom: 2px solid #e02424;
-  border-radius: 6px;
-  padding: 1px 5px;
+  border-radius: 4px;
+  padding: 1px 4px;
   margin: 0 1px;
   font-weight: 700 !important;
-  box-shadow: 0 1px 2px rgba(234, 43, 43, 0.15);
 }
 
 .diff-removed .diff-sign {
@@ -1158,11 +1155,10 @@ function triggerCheck() {
   background-color: #d7f8c0 !important;
   color: #277700 !important;
   border-bottom: 2px solid #58cc02;
-  border-radius: 6px;
-  padding: 1px 5px;
+  border-radius: 4px;
+  padding: 1px 4px;
   margin: 0 1px;
   font-weight: 700 !important;
-  box-shadow: 0 1px 2px rgba(88, 204, 2, 0.15);
 }
 
 .diff-added .diff-sign {
@@ -1178,11 +1174,11 @@ function triggerCheck() {
   align-items: center;
   gap: 2px;
   font-family: var(--duo-font-mono);
-  font-size: 9.5px;
+  font-size: 9px;
   font-weight: 900;
-  padding: 1px 5px;
+  padding: 1px 4px;
   margin: 0 2px;
-  border-radius: 4px;
+  border-radius: 3px;
   background-color: #ffc9c9;
   color: #a51d24;
   border: 1px solid #ff8787;
@@ -1200,7 +1196,7 @@ function triggerCheck() {
   font-weight: 700;
   padding: 1px 4px;
   margin: 0 2px;
-  border-radius: 4px;
+  border-radius: 3px;
   background-color: #f1f3f5;
   color: #868e96;
   border: 1px solid #dee2e6;
@@ -1214,186 +1210,13 @@ function triggerCheck() {
   opacity: 0.8;
 }
 
-/* COLUMN FOOTER */
-.column-footer {
-  padding: 10px 18px;
-  background-color: #fafafa;
-  border-top: 2px solid var(--duo-gray-border);
-  display: flex;
-  align-items: center;
-}
-
-.column-footer-text {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--duo-text-muted);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.diff-indicator-badge {
-  width: 10px;
-  height: 10px;
-  border-radius: 3px;
-  display: inline-block;
-}
-
-.diff-indicator-badge.red {
-  background-color: var(--duo-red);
-}
-
-.diff-indicator-badge.green {
-  background-color: var(--duo-green);
-}
-
-/* FIXED BOTTOM ACTION BAR */
-.duo-bottom-bar {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  background-color: #ffffff;
-  border-top: 2px solid var(--duo-gray-border);
-  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.05);
-  z-index: 99;
-}
-
-.bottom-container {
-  max-width: 1320px;
-  margin: 0 auto;
-  padding: 14px 24px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-}
-
-.metric-block {
-  flex: 1;
-  max-width: 320px;
-}
-
-.metric-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 6px;
-}
-
-.metric-title {
-  font-size: 12px;
-  font-weight: 900;
-  color: var(--duo-text-muted);
-  letter-spacing: 0.5px;
-}
-
-.metric-val {
-  font-size: 15px;
-  font-weight: 900;
-  color: var(--duo-green-dark);
-}
-
-.metric-val.val-perfect {
-  color: var(--duo-yellow-dark);
-}
-
-/* Progress Bar */
-.duo-progress-track {
-  height: 16px;
-  background-color: #e5e5e5;
-  border-radius: 10px;
-  overflow: hidden;
-  position: relative;
-}
-
-.duo-progress-fill {
-  height: 100%;
-  border-radius: 10px;
-  transition: width 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
-  position: relative;
-}
-
-.progress-normal {
-  background-color: var(--duo-green);
-}
-
-.progress-gold {
-  background-color: var(--duo-yellow);
-}
-
-.progress-shine {
-  position: absolute;
-  top: 3px;
-  left: 6px;
-  right: 6px;
-  height: 4px;
-  background-color: rgba(255, 255, 255, 0.4);
-  border-radius: 4px;
-}
-
-.summary-pills {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.diff-summary-card {
-  padding: 6px 16px;
-  border-radius: 14px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  border: 2px solid;
-}
-
-.diff-summary-card.red {
-  background-color: #fff2f2;
-  border-color: #ffd4d4;
-  color: var(--duo-red-dark);
-}
-
-.diff-summary-card.green {
-  background-color: #f2fde9;
-  border-color: #d6f6c2;
-  color: var(--duo-green-dark);
-}
-
-.summary-label {
-  font-size: 10px;
-  font-weight: 900;
-  letter-spacing: 0.5px;
-  opacity: 0.8;
-}
-
-.summary-num {
-  font-size: 18px;
-  font-weight: 900;
-  line-height: 1.1;
-}
-
-.check-btn {
-  min-width: 200px;
-}
-
 /* Responsive adjustments */
 @media (max-width: 900px) {
   .diff-split-container {
     grid-template-columns: 1fr;
   }
   .diff-column {
-    height: 420px;
-  }
-  .bottom-container {
-    flex-direction: column;
-    gap: 12px;
-  }
-  .metric-block {
-    max-width: 100%;
-    width: 100%;
-  }
-  .check-btn {
-    width: 100%;
+    height: 400px;
   }
 }
 </style>
